@@ -4,7 +4,7 @@
   "description": "YouTube download and transcription service for Railway",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node dist/server.js",
     "build": "tsc",
     "dev": "ts-node server.ts"
   },
