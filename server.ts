@@ -39,15 +39,186 @@ interface TranscriptionResponse {
     language?: string;
     duration?: number;
     usage?: any;
+    chunksProcessed?: number;
   };
   supabaseUrl?: string;
   error?: string;
+  chunksProcessed?: number;
 }
 
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+/**
+ * Get audio duration using ffprobe
+ */
+async function getAudioDuration(filePath: string): Promise<number> {
+  try {
+    const command = `ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${filePath}"`;
+    const { stdout } = await execAsync(command);
+    return parseFloat(stdout.trim());
+  } catch (error) {
+    console.error('❌ Failed to get audio duration:', error);
+    return 0;
+  }
+}
+
+/**
+ * Split audio file into chunks using ffmpeg
+ */
+async function splitAudioFile(
+  inputPath: string,
+  outputDir: string,
+  chunkDurationSeconds: number = 1400
+): Promise<string[]> {
+  try {
+    const jobId = path.basename(inputPath, '.mp3');
+    const chunkPaths: string[] = [];
+    
+    // Get total duration
+    const totalDuration = await getAudioDuration(inputPath);
+    const numChunks = Math.ceil(totalDuration / chunkDurationSeconds);
+    
+    console.log(`📂 Splitting audio into ${numChunks} chunks of ${chunkDurationSeconds}s each`);
+    
+    // Create chunks in parallel
+    const chunkPromises = [];
+    for (let i = 0; i < numChunks; i++) {
+      const startTime = i * chunkDurationSeconds;
+      const chunkPath = path.join(outputDir, `${jobId}_chunk_${i}.mp3`);
+      chunkPaths.push(chunkPath);
+      
+      const command = `ffmpeg -i "${inputPath}" -ss ${startTime} -t ${chunkDurationSeconds} -acodec libmp3lame "${chunkPath}" -y`;
+      chunkPromises.push(execAsync(command));
+    }
+    
+    // Wait for all chunks to be created
+    await Promise.all(chunkPromises);
+    console.log(`✅ Created ${numChunks} audio chunks`);
+    
+    return chunkPaths;
+  } catch (error) {
+    console.error('❌ Failed to split audio file:', error);
+    throw error;
+  }
+}
+
+/**
+ * Transcribes multiple audio chunks in parallel and merges results
+ */
+async function transcribeAudioChunksParallel(
+  chunkPaths: string[],
+  options: {
+    apiKey: string;
+    model: string;
+    language?: string;
+    temperature?: number;
+    prompt?: string;
+  },
+  chunkDurationSeconds: number = 1400
+): Promise<any> {
+  const openai = new OpenAI({ apiKey: options.apiKey });
+  const isGPT4oModel = options.model.includes('gpt-4o');
+  
+  console.log(`🎙️ Starting parallel transcription of ${chunkPaths.length} chunks`);
+  
+  // Transcribe all chunks in parallel
+  const transcriptionPromises = chunkPaths.map(async (chunkPath, index) => {
+    console.log(`🔄 Transcribing chunk ${index + 1}/${chunkPaths.length}`);
+    
+    const transcription = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(chunkPath),
+      model: options.model,
+      response_format: isGPT4oModel ? 'json' : 'verbose_json',
+      timestamp_granularities: isGPT4oModel ? undefined : ['segment'],
+      language: options.language,
+      temperature: options.temperature ?? 0,
+      prompt: options.prompt
+    });
+    
+    console.log(`✅ Completed chunk ${index + 1}/${chunkPaths.length}`);
+    
+    return {
+      index,
+      text: transcription.text,
+      segments: (transcription as any).segments || [],
+      language: (transcription as any).language,
+      duration: (transcription as any).duration || chunkDurationSeconds,
+      usage: (transcription as any).usage,
+      timeOffset: index * chunkDurationSeconds
+    };
+  });
+  
+  // Wait for all transcriptions to complete
+  const results = await Promise.all(transcriptionPromises);
+  
+  // Sort results by index to maintain order
+  results.sort((a, b) => a.index - b.index);
+  
+  // Merge all results
+  let mergedText = '';
+  let mergedSegments: any[] = [];
+  let totalDuration = 0;
+  let totalUsage = {
+    type: 'duration',
+    seconds: 0
+  };
+  
+  let segmentIdCounter = 0;
+  
+  results.forEach((result, chunkIndex) => {
+    // Merge text with space separator
+    if (mergedText) mergedText += ' ';
+    mergedText += result.text.trim();
+    
+    // Adjust segment timestamps and IDs
+    if (result.segments && result.segments.length > 0) {
+      const adjustedSegments = result.segments.map((segment: any) => ({
+        ...segment,
+        id: segmentIdCounter++,
+        start: segment.start + result.timeOffset,
+        end: segment.end + result.timeOffset,
+        seek: Math.floor((segment.start + result.timeOffset) * 100) // Convert to centiseconds
+      }));
+      
+      mergedSegments.push(...adjustedSegments);
+    }
+    
+    // Accumulate usage
+    if (result.usage && result.usage.seconds) {
+      totalUsage.seconds += result.usage.seconds;
+    } else if (result.usage && result.usage.total_tokens) {
+      // For token-based models, just add up the tokens
+      totalUsage.seconds += result.usage.total_tokens;
+    }
+    
+    totalDuration = Math.max(totalDuration, result.timeOffset + (result.duration || 0));
+  });
+  
+  // Clean up chunk files
+  chunkPaths.forEach(chunkPath => {
+    try {
+      if (fs.existsSync(chunkPath)) {
+        fs.unlinkSync(chunkPath);
+      }
+    } catch (error) {
+      console.warn(`⚠️ Failed to cleanup chunk: ${chunkPath}`);
+    }
+  });
+  
+  console.log(`✅ Merged ${results.length} transcription chunks`);
+  
+  return {
+    text: mergedText,
+    segments: mergedSegments,
+    language: results[0]?.language || 'unknown',
+    duration: totalDuration,
+    usage: totalUsage,
+    chunksProcessed: results.length
+  };
 }
 
 /**
@@ -105,36 +276,92 @@ app.post('/transcribe', async (req, res) => {
       throw new Error('MP3 file was not created');
     }
 
-    // Transcribe using OpenAI
+    // Check audio duration and transcribe (with automatic chunking if needed)
     console.log(`🎙️ Starting transcription for job ${jobId}`);
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const duration = await getAudioDuration(outputPath);
+    console.log(`🎵 Audio duration: ${duration.toFixed(2)} seconds`);
     
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const isGPT4oModel = transcriptionModel.includes('gpt-4o');
     
-    const transcription = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(outputPath),
-      model: transcriptionModel,
-      response_format: isGPT4oModel ? 'json' : 'verbose_json',
-      timestamp_granularities: isGPT4oModel ? undefined : ['segment'],
-      language: language,
-      temperature: temperature ?? 0,
-    });
+    // For GPT-4o models, check if we need to split (1400s limit)
+    // For whisper-1, we can handle longer files but chunking can still be beneficial for very long files
+    const maxDuration = isGPT4oModel ? 1400 : 3600; // 1400s for GPT-4o, 1 hour for Whisper
+    
+    let transcriptData;
+    
+    if (duration > maxDuration) {
+      console.log(`⚠️ Audio duration (${duration}s) exceeds limit (${maxDuration}s). Using chunked transcription.`);
+      
+      // Create temporary directory for chunks
+      const tempDir = path.join(path.dirname(outputPath), 'chunks');
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+      
+      try {
+        // Split audio into chunks
+        const chunkPaths = await splitAudioFile(outputPath, tempDir, maxDuration);
+        
+        // Transcribe all chunks in parallel
+        transcriptData = await transcribeAudioChunksParallel(
+          chunkPaths, 
+          {
+            apiKey: process.env.OPENAI_API_KEY!,
+            model: transcriptionModel,
+            language: language,
+            temperature: temperature ?? 0
+          },
+          maxDuration
+        );
+        
+        // Clean up temp directory
+        try {
+          fs.rmSync(tempDir, { recursive: true, force: true });
+        } catch (cleanupError) {
+          console.warn('⚠️ Failed to cleanup temp directory:', cleanupError);
+        }
+        
+        console.log(`✅ Chunked transcription completed for job ${jobId} (${transcriptData.chunksProcessed} chunks)`);
+      } catch (error) {
+        // Clean up on error
+        try {
+          fs.rmSync(tempDir, { recursive: true, force: true });
+        } catch (cleanupError) {
+          console.warn('⚠️ Failed to cleanup temp directory after error:', cleanupError);
+        }
+        throw error;
+      }
+    } else {
+      // File is small enough, use standard transcription
+      console.log(`✅ Audio duration within limits, using standard transcription`);
+      
+      const transcription = await openai.audio.transcriptions.create({
+        file: fs.createReadStream(outputPath),
+        model: transcriptionModel,
+        response_format: isGPT4oModel ? 'json' : 'verbose_json',
+        timestamp_granularities: isGPT4oModel ? undefined : ['segment'],
+        language: language,
+        temperature: temperature ?? 0,
+      });
 
-    console.log(`✅ Transcription completed for job ${jobId}`);
-
-    const transcriptData = {
-      text: transcription.text,
-      segments: (transcription as any).segments,
-      language: (transcription as any).language,
-      duration: (transcription as any).duration,
-      usage: (transcription as any).usage
-    };
+      transcriptData = {
+        text: transcription.text,
+        segments: (transcription as any).segments,
+        language: (transcription as any).language,
+        duration: (transcription as any).duration,
+        usage: (transcription as any).usage,
+        chunksProcessed: 1
+      };
+      
+      console.log(`✅ Standard transcription completed for job ${jobId}`);
+    }
 
     // Upload vers Supabase si configuré
     const supabaseUrl = await uploadTranscriptionToSupabase(
       jobId, 
       transcriptData, 
-      transcription.text
+      transcriptData.text
     );
 
     // Sauvegarder les métadonnées dans la table Supabase
@@ -152,11 +379,11 @@ app.post('/transcribe', async (req, res) => {
         durationSeconds: youtubeMetadata.durationSeconds,
         uploadDate: youtubeMetadata.uploadDate,
         transcriptionFilePath: supabaseUrl,
-        transcriptionText: transcription.text,
-        language: (transcription as any).language,
-        segmentsCount: (transcription as any).segments?.length,
+        transcriptionText: transcriptData.text,
+        language: transcriptData.language,
+        segmentsCount: transcriptData.segments?.length,
         transcriptionModel,
-        openaiTokensUsed: (transcription as any).usage?.total_tokens,
+        openaiTokensUsed: transcriptData.usage?.total_tokens,
         fileSizeBytes: fs.statSync(outputPath).size
       };
 
@@ -168,7 +395,8 @@ app.post('/transcribe', async (req, res) => {
       jobId,
       downloadUrl: `/download/${filename}`,
       transcript: transcriptData,
-      supabaseUrl: supabaseUrl || undefined
+      supabaseUrl: supabaseUrl || undefined,
+      chunksProcessed: transcriptData.chunksProcessed || 1
     };
 
     // Cleanup file after 1 hour (optional)
