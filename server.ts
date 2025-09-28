@@ -6,6 +6,14 @@ import fs from 'fs';
 import path from 'path';
 import OpenAI from 'openai';
 import { v4 as uuidv4 } from 'uuid';
+import { 
+  getYouTubeMetadata, 
+  uploadTranscriptionToSupabase, 
+  saveVideoMetadataToSupabase,
+  searchTranscriptions,
+  getTranscriptionByJobId,
+  VideoMetadata 
+} from './supabase-utils';
 
 const execAsync = promisify(exec);
 const app = express();
@@ -32,6 +40,7 @@ interface TranscriptionResponse {
     duration?: number;
     usage?: any;
   };
+  supabaseUrl?: string;
   error?: string;
 }
 
@@ -75,6 +84,10 @@ app.post('/transcribe', async (req, res) => {
   const jobId = uuidv4();
   console.log(`🎵 Starting job ${jobId} for URL: ${youtubeUrl}`);
 
+  // Récupérer les métadonnées YouTube d'abord
+  console.log(`📋 Getting YouTube metadata for job ${jobId}`);
+  const youtubeMetadata = await getYouTubeMetadata(youtubeUrl);
+
   try {
     // Download video using yt-dlp
     const filename = `${jobId}.mp3`;
@@ -109,17 +122,53 @@ app.post('/transcribe', async (req, res) => {
 
     console.log(`✅ Transcription completed for job ${jobId}`);
 
+    const transcriptData = {
+      text: transcription.text,
+      segments: (transcription as any).segments,
+      language: (transcription as any).language,
+      duration: (transcription as any).duration,
+      usage: (transcription as any).usage
+    };
+
+    // Upload vers Supabase si configuré
+    const supabaseUrl = await uploadTranscriptionToSupabase(
+      jobId, 
+      transcriptData, 
+      transcription.text
+    );
+
+    // Sauvegarder les métadonnées dans la table Supabase
+    if (youtubeMetadata && supabaseUrl) {
+      const videoMetadata: VideoMetadata = {
+        jobId,
+        youtubeUrl,
+        videoId: youtubeMetadata.videoId,
+        title: youtubeMetadata.title,
+        description: youtubeMetadata.description,
+        views: youtubeMetadata.views,
+        likes: youtubeMetadata.likes,
+        channelName: youtubeMetadata.channelName,
+        channelUrl: youtubeMetadata.channelUrl,
+        durationSeconds: youtubeMetadata.durationSeconds,
+        uploadDate: youtubeMetadata.uploadDate,
+        transcriptionFilePath: supabaseUrl,
+        transcriptionText: transcription.text,
+        language: (transcription as any).language,
+        segmentsCount: (transcription as any).segments?.length,
+        transcriptionModel,
+        openaiTokensUsed: (transcription as any).usage?.total_tokens,
+        fileSizeBytes: fs.statSync(outputPath).size
+      };
+
+      await saveVideoMetadataToSupabase(videoMetadata);
+    }
+
     const result: TranscriptionResponse = {
       success: true,
       jobId,
       downloadUrl: `/download/${filename}`,
-      transcript: {
-        text: transcription.text,
-        segments: (transcription as any).segments,
-        language: (transcription as any).language,
-        duration: (transcription as any).duration,
-        usage: (transcription as any).usage
-      }
+      transcript: transcriptData,
+      supabaseUrl: supabaseUrl || undefined
     };
 
     // Cleanup file after 1 hour (optional)
@@ -176,6 +225,60 @@ app.get('/download/:filename', (req, res) => {
 });
 
 /**
+ * Recherche de transcriptions
+ */
+app.get('/search', async (req, res) => {
+  const { q, limit = 10 } = req.query;
+  
+  if (!q || typeof q !== 'string') {
+    return res.status(400).json({ error: 'Query parameter "q" is required' });
+  }
+
+  try {
+    const { data, error } = await searchTranscriptions(q, Number(limit));
+    
+    if (error) {
+      return res.status(500).json({ error: error });
+    }
+
+    res.json({
+      query: q,
+      results: data?.length || 0,
+      transcriptions: data || []
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      error: error instanceof Error ? error.message : 'Search failed' 
+    });
+  }
+});
+
+/**
+ * Obtenir une transcription par job_id
+ */
+app.get('/transcription/:jobId', async (req, res) => {
+  const { jobId } = req.params;
+  
+  try {
+    const { data, error } = await getTranscriptionByJobId(jobId);
+    
+    if (error) {
+      return res.status(500).json({ error });
+    }
+    
+    if (!data) {
+      return res.status(404).json({ error: 'Transcription not found' });
+    }
+
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ 
+      error: error instanceof Error ? error.message : 'Failed to get transcription' 
+    });
+  }
+});
+
+/**
  * Get service info
  */
 app.get('/info', async (req, res) => {
@@ -188,6 +291,7 @@ app.get('/info', async (req, res) => {
       version: '1.0.0',
       ytdlp: ytdlpVersion.trim(),
       openai: process.env.OPENAI_API_KEY ? 'configured' : 'missing',
+      supabase: process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY ? 'configured' : 'missing',
       uptime: process.uptime(),
       memory: process.memoryUsage()
     });
@@ -196,7 +300,8 @@ app.get('/info', async (req, res) => {
       service: 'YouTube Transcription Service',
       version: '1.0.0',
       error: 'yt-dlp not available',
-      openai: process.env.OPENAI_API_KEY ? 'configured' : 'missing'
+      openai: process.env.OPENAI_API_KEY ? 'configured' : 'missing',
+      supabase: process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY ? 'configured' : 'missing'
     });
   }
 });
