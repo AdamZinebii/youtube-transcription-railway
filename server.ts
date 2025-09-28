@@ -24,6 +24,7 @@ app.use(express.json());
 
 interface TranscriptionRequest {
   youtubeUrl: string;
+  userId: string; // ID de l'utilisateur ChatGenius
   transcriptionModel?: 'gpt-4o-transcribe' | 'gpt-4o-mini-transcribe' | 'whisper-1';
   language?: string;
   temperature?: number;
@@ -236,12 +237,19 @@ app.get('/health', (req, res) => {
  * Download YouTube video and transcribe
  */
 app.post('/transcribe', async (req, res) => {
-  const { youtubeUrl, transcriptionModel = 'whisper-1', language, temperature }: TranscriptionRequest = req.body;
+  const { youtubeUrl, userId, transcriptionModel = 'whisper-1', language, temperature }: TranscriptionRequest = req.body;
   
   if (!youtubeUrl) {
     return res.status(400).json({
       success: false,
       error: 'youtubeUrl is required'
+    });
+  }
+
+  if (!userId) {
+    return res.status(400).json({
+      success: false,
+      error: 'userId is required'
     });
   }
 
@@ -371,6 +379,7 @@ app.post('/transcribe', async (req, res) => {
       const videoMetadata: VideoMetadata = {
         jobId,
         youtubeUrl,
+        userId, // Ajouter l'ID utilisateur
         videoId: youtubeMetadata.videoId,
         title: youtubeMetadata.title,
         description: youtubeMetadata.description,

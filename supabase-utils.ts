@@ -7,6 +7,7 @@ export interface VideoMetadata {
   youtubeUrl: string;
   videoId: string;
   title: string;
+  userId: string; // ID de l'utilisateur ChatGenius
   description?: string;
   views?: number;
   likes?: number;
@@ -141,6 +142,7 @@ export async function saveVideoMetadataToSupabase(metadata: VideoMetadata): Prom
         youtube_url: metadata.youtubeUrl,
         video_id: metadata.videoId,
         title: metadata.title,
+        user_id: metadata.userId, // Ajouter l'ID utilisateur
         description: metadata.description,
         views: metadata.views,
         likes: metadata.likes,
