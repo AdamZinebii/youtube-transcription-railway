@@ -19,8 +19,27 @@ const execAsync = promisify(exec);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+// Configure CORS pour permettre les requêtes depuis ChatGenius
+app.use(cors({
+  origin: [
+    'https://chatgenius-app.vercel.app',
+    'http://localhost:3000',
+    'http://localhost:5173'
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false
+}));
+
 app.use(express.json());
+
+// Handle preflight requests explicitly
+app.options('*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.sendStatus(200);
+});
 
 interface TranscriptionRequest {
   youtubeUrl: string;
