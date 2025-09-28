@@ -9,6 +9,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { 
   getYouTubeMetadata, 
   uploadTranscriptionToSupabase, 
+  createInitialVideoRecord,
+  updateVideoStatus,
   saveVideoMetadataToSupabase,
   searchTranscriptions,
   getTranscriptionByJobId,
@@ -282,11 +284,19 @@ app.post('/transcribe', async (req, res) => {
   const jobId = uuidv4();
   console.log(`🎵 Starting job ${jobId} for URL: ${youtubeUrl}`);
 
+  // 🔄 Créer l'enregistrement initial avec statut "Upload"
+  const recordId = await createInitialVideoRecord(jobId, youtubeUrl, userId);
+  if (!recordId) {
+    console.warn('⚠️ Failed to create initial record, continuing without database tracking');
+  }
+
   // Récupérer les métadonnées YouTube d'abord
   console.log(`📋 Getting YouTube metadata for job ${jobId}`);
   const youtubeMetadata = await getYouTubeMetadata(youtubeUrl);
 
   try {
+    // 🔄 Mettre à jour le statut à "Ingestion"
+    await updateVideoStatus(jobId, 'Ingestion');
     // Download video using yt-dlp
     const filename = `${jobId}.mp3`;
     const outputPath = path.join(uploadsDir, filename);

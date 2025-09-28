@@ -126,6 +126,82 @@ export async function uploadTranscriptionToSupabase(
 }
 
 /**
+ * Créer l'enregistrement initial avec statut "Upload"
+ */
+export async function createInitialVideoRecord(jobId: string, youtubeUrl: string, userId: string): Promise<string | null> {
+  if (!supabase) {
+    console.warn('⚠️ Supabase not configured, skipping database save');
+    return null;
+  }
+
+  try {
+    // Extract video ID from URL for the record
+    const videoIdMatch = youtubeUrl.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]+)/);
+    const videoId = videoIdMatch ? videoIdMatch[1] : jobId;
+
+    const { data, error } = await supabase
+      .from('video_transcriptions')
+      .insert({
+        job_id: jobId,
+        youtube_url: youtubeUrl,
+        video_id: videoId,
+        title: 'Processing...', // Placeholder title
+        user_id: userId,
+        transcription_file_path: '', // Will be filled later
+        transcription_text: '', // Will be filled later
+        status: 'Upload',
+        file_size_bytes: 0 // Will be filled later
+      })
+      .select('id')
+      .single();
+
+    if (error) {
+      console.error('❌ Failed to create initial video record:', error);
+      return null;
+    }
+
+    console.log('✅ Initial video record created with Upload status');
+    return data.id;
+    
+  } catch (error) {
+    console.error('❌ Create initial video record failed:', error);
+    return null;
+  }
+}
+
+/**
+ * Mettre à jour le statut d'une vidéo
+ */
+export async function updateVideoStatus(jobId: string, status: 'Upload' | 'Ingestion' | 'Ready'): Promise<boolean> {
+  if (!supabase) {
+    console.warn('⚠️ Supabase not configured, skipping status update');
+    return false;
+  }
+
+  try {
+    const { error } = await supabase
+      .from('video_transcriptions')
+      .update({ 
+        status,
+        updated_at: new Date().toISOString()
+      })
+      .eq('job_id', jobId);
+
+    if (error) {
+      console.error('❌ Failed to update video status:', error);
+      return false;
+    }
+
+    console.log(`✅ Video status updated to: ${status}`);
+    return true;
+    
+  } catch (error) {
+    console.error('❌ Update video status failed:', error);
+    return false;
+  }
+}
+
+/**
  * Sauvegarder les métadonnées dans la table Supabase
  */
 export async function saveVideoMetadataToSupabase(metadata: VideoMetadata): Promise<boolean> {
@@ -137,12 +213,8 @@ export async function saveVideoMetadataToSupabase(metadata: VideoMetadata): Prom
   try {
     const { data, error } = await supabase
       .from('video_transcriptions')
-      .insert({
-        job_id: metadata.jobId,
-        youtube_url: metadata.youtubeUrl,
-        video_id: metadata.videoId,
+      .update({
         title: metadata.title,
-        user_id: metadata.userId, // Ajouter l'ID utilisateur
         description: metadata.description,
         views: metadata.views,
         likes: metadata.likes,
@@ -156,8 +228,11 @@ export async function saveVideoMetadataToSupabase(metadata: VideoMetadata): Prom
         segments_count: metadata.segmentsCount,
         transcription_model: metadata.transcriptionModel,
         openai_tokens_used: metadata.openaiTokensUsed,
-        file_size_bytes: metadata.fileSizeBytes
-      });
+        file_size_bytes: metadata.fileSizeBytes,
+        status: 'Ready', // Final status
+        updated_at: new Date().toISOString()
+      })
+      .eq('job_id', metadata.jobId);
 
     if (error) {
       console.error('❌ Supabase database error:', error);
