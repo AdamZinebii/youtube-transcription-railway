@@ -14,6 +14,7 @@ import {
   saveVideoMetadataToSupabase,
   searchTranscriptions,
   getTranscriptionByJobId,
+  processVideoThroughAIFunctions,
   VideoMetadata 
 } from './supabase-utils';
 
@@ -427,7 +428,29 @@ app.post('/transcribe', async (req, res) => {
         fileSizeBytes: fs.statSync(outputPath).size
       };
 
-      await saveVideoMetadataToSupabase(videoMetadata);
+      const metadataSaved = await saveVideoMetadataToSupabase(videoMetadata);
+      
+      // If metadata saved successfully, start AI processing pipeline
+      if (metadataSaved && supabaseUrl) {
+        console.log(`📶 Starting AI processing pipeline for job: ${jobId}`);
+        
+        // Run AI processing in background (don't await to avoid timeout)
+        // Get the video_transcription_id by looking up the saved record
+        setTimeout(async () => {
+          try {
+            const { getTranscriptionByJobId } = await import('./supabase-utils');
+            const { data: transcriptionRecord } = await getTranscriptionByJobId(jobId);
+            
+            if (transcriptionRecord?.id) {
+              await processVideoThroughAIFunctions(transcriptionRecord.id, jobId);
+            } else {
+              console.error(`❌ Could not find video transcription record for job: ${jobId}`);
+            }
+          } catch (aiError) {
+            console.error(`❌ AI processing pipeline failed for job ${jobId}:`, aiError);
+          }
+        }, 1000); // Start after 1 second to ensure response is sent first
+      }
     }
 
     const result: TranscriptionResponse = {

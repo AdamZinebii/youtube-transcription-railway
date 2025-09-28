@@ -177,7 +177,7 @@ export async function createInitialVideoRecord(jobId: string, youtubeUrl: string
 /**
  * Mettre à jour le statut d'une vidéo
  */
-export async function updateVideoStatus(jobId: string, status: 'Upload' | 'Ingestion' | 'Ready'): Promise<boolean> {
+export async function updateVideoStatus(jobId: string, status: 'Upload' | 'Ingestion' | 'Processing' | 'Ready'): Promise<boolean> {
   if (!supabase) {
     console.warn('⚠️ Supabase not configured, skipping status update');
     return false;
@@ -236,7 +236,7 @@ export async function saveVideoMetadataToSupabase(metadata: VideoMetadata): Prom
         transcription_model: metadata.transcriptionModel,
         openai_tokens_used: metadata.openaiTokensUsed,
         file_size_bytes: metadata.fileSizeBytes,
-        status: 'Ready', // Final status
+        status: 'Processing', // Set to Processing, will be updated to Ready after Edge Functions
         updated_at: new Date().toISOString()
       })
       .eq('job_id', metadata.jobId)
@@ -304,4 +304,138 @@ export async function getTranscriptionByJobId(jobId: string) {
     .single();
 
   return { data, error };
+}
+
+/**
+ * Call transcript-segmenter Supabase Edge Function
+ */
+export async function callTranscriptSegmenter(videoTranscriptionId: string): Promise<boolean> {
+  if (!supabase) {
+    console.warn('⚠️ Supabase not configured, skipping transcript segmentation');
+    return false;
+  }
+
+  try {
+    console.log(`🧠 Calling transcript-segmenter for video: ${videoTranscriptionId}`);
+    
+    const { data, error } = await supabase.functions.invoke('transcript-segmenter', {
+      body: { video_transcription_id: videoTranscriptionId }
+    });
+
+    if (error) {
+      console.error('❌ Error calling transcript-segmenter:', error);
+      return false;
+    }
+
+    console.log('✅ Transcript segmentation completed:', data?.metadata);
+    return true;
+
+  } catch (error) {
+    console.error('❌ Transcript segmentation failed:', error);
+    return false;
+  }
+}
+
+/**
+ * Call embed-video Supabase Edge Function
+ */
+export async function callEmbedVideo(videoTranscriptionId: string): Promise<boolean> {
+  if (!supabase) {
+    console.warn('⚠️ Supabase not configured, skipping video embedding');
+    return false;
+  }
+
+  try {
+    console.log(`🔍 Calling embed-video for video: ${videoTranscriptionId}`);
+    
+    const { data, error } = await supabase.functions.invoke('embed-video', {
+      body: { video_transcription_id: videoTranscriptionId }
+    });
+
+    if (error) {
+      console.error('❌ Error calling embed-video:', error);
+      return false;
+    }
+
+    console.log('✅ Video embedding completed:', data?.embedding_length);
+    return true;
+
+  } catch (error) {
+    console.error('❌ Video embedding failed:', error);
+    return false;
+  }
+}
+
+/**
+ * Call embed-segment Supabase Edge Function for a specific video
+ */
+export async function callEmbedSegments(videoTranscriptionId: string): Promise<boolean> {
+  if (!supabase) {
+    console.warn('⚠️ Supabase not configured, skipping segment embedding');
+    return false;
+  }
+
+  try {
+    console.log(`🔍 Calling embed-segment for video: ${videoTranscriptionId}`);
+    
+    const { data, error } = await supabase.functions.invoke('embed-segment', {
+      body: { 
+        video_transcription_id: videoTranscriptionId,
+        batch_mode: true,
+        batch_limit: 50 // Process all segments for this video
+      }
+    });
+
+    if (error) {
+      console.error('❌ Error calling embed-segment:', error);
+      return false;
+    }
+
+    console.log(`✅ Segment embedding completed: ${data?.successful}/${data?.processed} segments`);
+    return true;
+
+  } catch (error) {
+    console.error('❌ Segment embedding failed:', error);
+    return false;
+  }
+}
+
+/**
+ * Process video through all AI enhancement functions
+ */
+export async function processVideoThroughAIFunctions(videoTranscriptionId: string, jobId: string): Promise<boolean> {
+  console.log(`🚀 Starting AI processing pipeline for video: ${videoTranscriptionId}`);
+  
+  try {
+    // Step 1: Segment the transcript using Claude
+    const segmentationSuccess = await callTranscriptSegmenter(videoTranscriptionId);
+    if (!segmentationSuccess) {
+      console.error('❌ Transcript segmentation failed, stopping pipeline');
+      return false;
+    }
+
+    // Step 2: Create video-level embeddings
+    const videoEmbedSuccess = await callEmbedVideo(videoTranscriptionId);
+    if (!videoEmbedSuccess) {
+      console.error('❌ Video embedding failed, stopping pipeline');
+      return false;
+    }
+
+    // Step 3: Create segment-level embeddings
+    const segmentEmbedSuccess = await callEmbedSegments(videoTranscriptionId);
+    if (!segmentEmbedSuccess) {
+      console.error('❌ Segment embedding failed, stopping pipeline');
+      return false;
+    }
+
+    // Step 4: Update final status to Ready
+    await updateVideoStatus(jobId, 'Ready');
+    
+    console.log('🎉 AI processing pipeline completed successfully!');
+    return true;
+
+  } catch (error) {
+    console.error('❌ AI processing pipeline failed:', error);
+    return false;
+  }
 }
