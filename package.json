@@ -1,0 +1,29 @@
+{
+  "name": "youtube-transcription-service",
+  "version": "1.0.0",
+  "description": "YouTube download and transcription service for Railway",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "build": "tsc",
+    "dev": "ts-node server.ts"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "multer": "^1.4.5-lts.1",
+    "openai": "^4.24.0",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/cors": "^2.8.17",
+    "@types/multer": "^1.4.11",
+    "@types/uuid": "^9.0.7",
+    "typescript": "^5.3.0",
+    "ts-node": "^10.9.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
