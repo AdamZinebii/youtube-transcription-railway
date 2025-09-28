@@ -288,9 +288,11 @@ app.post('/transcribe', async (req, res) => {
     // For whisper-1, we can handle longer files but chunking can still be beneficial for very long files
     const maxDuration = isGPT4oModel ? 1400 : 3600; // 1400s for GPT-4o, 1 hour for Whisper
     
+    console.log(`🔍 Model: ${transcriptionModel}, isGPT4o: ${isGPT4oModel}, maxDuration: ${maxDuration}, actualDuration: ${duration}`);
+    
     let transcriptData;
     
-    if (duration > maxDuration) {
+    if (duration >= maxDuration) {
       console.log(`⚠️ Audio duration (${duration}s) exceeds limit (${maxDuration}s). Using chunked transcription.`);
       
       // Create temporary directory for chunks
