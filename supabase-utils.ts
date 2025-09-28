@@ -211,6 +211,8 @@ export async function saveVideoMetadataToSupabase(metadata: VideoMetadata): Prom
   }
 
   try {
+    console.log(`🔄 Updating video metadata for job_id: ${metadata.jobId}`);
+    
     const { data, error } = await supabase
       .from('video_transcriptions')
       .update({
@@ -232,14 +234,30 @@ export async function saveVideoMetadataToSupabase(metadata: VideoMetadata): Prom
         status: 'Ready', // Final status
         updated_at: new Date().toISOString()
       })
-      .eq('job_id', metadata.jobId);
+      .eq('job_id', metadata.jobId)
+      .select(); // Add select to return the updated data
 
     if (error) {
       console.error('❌ Supabase database error:', error);
       return false;
     }
 
-    console.log('✅ Video metadata saved to Supabase database');
+    if (!data || data.length === 0) {
+      console.error(`❌ No record found with job_id: ${metadata.jobId} for UPDATE`);
+      
+      // Try to find existing record for debugging
+      const { data: existingRecord } = await supabase
+        .from('video_transcriptions')
+        .select('job_id, status, user_id')
+        .eq('job_id', metadata.jobId)
+        .single();
+        
+      console.log('🔍 Existing record check:', existingRecord);
+      return false;
+    }
+
+    console.log(`✅ Video metadata updated successfully. Records affected: ${data.length}`);
+    console.log('✅ Status updated to: Ready');
     return true;
     
   } catch (error) {
