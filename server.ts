@@ -264,7 +264,7 @@ app.post('/transcribe', async (req, res) => {
     const filename = `${jobId}.mp3`;
     const outputPath = path.join(uploadsDir, filename);
     
-    const command = `yt-dlp -f bestaudio --extract-audio --audio-format mp3 "${youtubeUrl}" -o "${outputPath.replace('.mp3', '.%(ext)s')}"`;
+    const command = `yt-dlp -f "bestaudio[ext=m4a]/bestaudio/best" --extract-audio --audio-format mp3 --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" --referer "https://www.youtube.com/" "${youtubeUrl}" -o "${outputPath.replace('.mp3', '.%(ext)s')}"`;
     
     console.log(`📥 Downloading: ${command}`);
     const { stdout, stderr } = await execAsync(command, { timeout: 300000 }); // 5 minute timeout
