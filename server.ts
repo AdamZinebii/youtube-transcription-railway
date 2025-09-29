@@ -11,6 +11,7 @@ import {
   uploadTranscriptionToSupabase, 
   uploadThumbnailToSupabase,
   createInitialVideoRecord,
+  updateInitialVideoMetadata,
   updateVideoStatus,
   saveVideoMetadataToSupabase,
   searchTranscriptions,
@@ -292,7 +293,7 @@ app.post('/transcribe', async (req, res) => {
     console.warn('⚠️ Failed to create initial record, continuing without database tracking');
   }
 
-  // Récupérer les métadonnées YouTube d'abord
+  // 📋 Phase 1: Get YouTube metadata during Upload status
   console.log(`📋 Getting YouTube metadata for job ${jobId}`);
   const youtubeMetadata = await getYouTubeMetadata(youtubeUrl);
   
@@ -305,8 +306,43 @@ app.post('/transcribe', async (req, res) => {
     console.log(`❌ Failed to retrieve YouTube metadata`);
   }
 
+  // 📸 Phase 2: Upload thumbnail during Upload status
+  let thumbnailUrl: string | null = null;
+  if (youtubeMetadata) {
+    console.log(`📸 Attempting thumbnail upload for job: ${jobId}`);
+    thumbnailUrl = await uploadThumbnailToSupabase(jobId, youtubeUrl, youtubeMetadata?.thumbnail);
+    if (thumbnailUrl) {
+      console.log(`✅ Thumbnail uploaded successfully: ${thumbnailUrl}`);
+    } else {
+      console.log(`❌ Thumbnail upload failed for job: ${jobId}`);
+    }
+  }
+
+  // 🔄 Phase 3: Update initial record with metadata and thumbnail (still Upload status)
+  if (youtubeMetadata) {
+    const initialMetadata = {
+      title: youtubeMetadata.title,
+      description: youtubeMetadata.description,
+      views: youtubeMetadata.views,
+      likes: youtubeMetadata.likes,
+      channelName: youtubeMetadata.channelName,
+      channelUrl: youtubeMetadata.channelUrl,
+      durationSeconds: youtubeMetadata.durationSeconds,
+      uploadDate: youtubeMetadata.uploadDate,
+      thumbnailUrl: thumbnailUrl || undefined
+    };
+    
+    const metadataUpdated = await updateInitialVideoMetadata(jobId, initialMetadata);
+    if (metadataUpdated) {
+      console.log(`✅ Initial metadata and thumbnail saved for job: ${jobId}`);
+    } else {
+      console.log(`⚠️ Failed to save initial metadata for job: ${jobId}`);
+    }
+  }
+
   try {
-    // 🔄 Mettre à jour le statut à "Ingestion"
+    // 🔄 Phase 4: Now move to Ingestion status and start MP3 download
+    console.log(`🔄 Moving to Ingestion phase for job: ${jobId}`);
     await updateVideoStatus(jobId, 'Ingestion');
     // Download video using yt-dlp
     const filename = `${jobId}.mp3`;
@@ -414,17 +450,7 @@ app.post('/transcribe', async (req, res) => {
       transcriptData.text
     );
 
-    // Upload thumbnail to Supabase Storage - now using yt-dlp method
-    let thumbnailUrl: string | null = null;
-    console.log(`📸 Attempting thumbnail upload for job: ${jobId}`);
-    thumbnailUrl = await uploadThumbnailToSupabase(jobId, youtubeUrl, youtubeMetadata?.thumbnail);
-    if (thumbnailUrl) {
-      console.log(`✅ Thumbnail uploaded successfully: ${thumbnailUrl}`);
-    } else {
-      console.log(`❌ Thumbnail upload failed for job: ${jobId}`);
-    }
-
-    // Sauvegarder les métadonnées dans la table Supabase
+    // Sauvegarder les métadonnées finales avec transcription dans la table Supabase
     if (youtubeMetadata && supabaseUrl) {
       const videoMetadata: VideoMetadata = {
         jobId,
@@ -439,8 +465,7 @@ app.post('/transcribe', async (req, res) => {
         channelUrl: youtubeMetadata.channelUrl,
         durationSeconds: youtubeMetadata.durationSeconds,
         uploadDate: youtubeMetadata.uploadDate,
-        thumbnail: youtubeMetadata.thumbnail,
-        thumbnailUrl: thumbnailUrl || undefined,
+        thumbnailUrl: thumbnailUrl || undefined, // Use thumbnail URL from Upload phase
         transcriptionFilePath: supabaseUrl,
         transcriptionText: transcriptData.text,
         language: transcriptData.language,

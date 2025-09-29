@@ -18,7 +18,6 @@ export interface VideoMetadata {
   channelUrl?: string;
   durationSeconds?: number;
   uploadDate?: string;
-  thumbnail?: string;
   thumbnailUrl?: string; // URL from Supabase storage
   transcriptionFilePath: string;
   transcriptionText: string;
@@ -392,6 +391,61 @@ export async function createInitialVideoRecord(jobId: string, youtubeUrl: string
 }
 
 /**
+ * Update initial video record with metadata and thumbnail during Upload status
+ */
+export async function updateInitialVideoMetadata(
+  jobId: string, 
+  metadata: {
+    title: string;
+    description?: string;
+    views?: number;
+    likes?: number;
+    channelName?: string;
+    channelUrl?: string;
+    durationSeconds?: number;
+    uploadDate?: string;
+    thumbnailUrl?: string;
+  }
+): Promise<boolean> {
+  if (!supabase) {
+    console.warn('⚠️ Supabase not configured, skipping metadata update');
+    return false;
+  }
+
+  try {
+    console.log(`🔄 Updating initial metadata for job_id: ${jobId}`);
+    
+    const { error } = await supabase
+      .from('video_transcriptions')
+      .update({
+        title: metadata.title,
+        description: metadata.description,
+        views: metadata.views,
+        likes: metadata.likes,
+        channel_name: metadata.channelName,
+        channel_url: metadata.channelUrl,
+        duration_seconds: metadata.durationSeconds,
+        upload_date: metadata.uploadDate,
+        thumbnail_url: metadata.thumbnailUrl,
+        updated_at: new Date().toISOString()
+      })
+      .eq('job_id', jobId);
+
+    if (error) {
+      console.error('❌ Failed to update initial metadata:', error);
+      return false;
+    }
+
+    console.log(`✅ Initial metadata updated successfully for job: ${jobId}`);
+    return true;
+    
+  } catch (error) {
+    console.error('❌ Update initial metadata failed:', error);
+    return false;
+  }
+}
+
+/**
  * Mettre à jour le statut d'une vidéo
  */
 export async function updateVideoStatus(jobId: string, status: 'Upload' | 'Ingestion' | 'Processing' | 'Ready'): Promise<boolean> {
@@ -446,7 +500,6 @@ export async function saveVideoMetadataToSupabase(metadata: VideoMetadata): Prom
         channel_url: metadata.channelUrl,
         duration_seconds: metadata.durationSeconds,
         upload_date: metadata.uploadDate,
-        thumbnail: metadata.thumbnail,
         thumbnail_url: metadata.thumbnailUrl,
         transcription_file_path: metadata.transcriptionFilePath,
         transcription_text: metadata.transcriptionText,
