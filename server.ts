@@ -17,6 +17,8 @@ import {
   searchTranscriptions,
   getTranscriptionByJobId,
   processVideoThroughAIFunctions,
+  isChannelUrl,
+  getChannelVideos,
   VideoMetadata 
 } from './supabase-utils';
 
@@ -56,7 +58,12 @@ interface TranscriptionRequest {
 
 interface TranscriptionResponse {
   success: boolean;
-  jobId: string;
+  jobId?: string;
+  jobIds?: string[]; // For channel processing
+  isChannel?: boolean;
+  channelUrl?: string;
+  videosProcessed?: number;
+  totalVideos?: number;
   downloadUrl?: string;
   transcript?: {
     text: string;
@@ -247,43 +254,15 @@ async function transcribeAudioChunksParallel(
 }
 
 /**
- * Health check endpoint
+ * Process a single YouTube video through the transcription pipeline
  */
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    service: 'YouTube Transcription Service',
-    timestamp: new Date().toISOString()
-  });
-});
-
-/**
- * Download YouTube video and transcribe
- */
-app.post('/transcribe', async (req, res) => {
-  const { youtubeUrl, userId, transcriptionModel = 'whisper-1', language, temperature }: TranscriptionRequest = req.body;
-  
-  if (!youtubeUrl) {
-    return res.status(400).json({
-      success: false,
-      error: 'youtubeUrl is required'
-    });
-  }
-
-  if (!userId) {
-    return res.status(400).json({
-      success: false,
-      error: 'userId is required'
-    });
-  }
-
-  if (!process.env.OPENAI_API_KEY) {
-    return res.status(500).json({
-      success: false,
-      error: 'OPENAI_API_KEY not configured'
-    });
-  }
-
+async function processSingleVideo(
+  youtubeUrl: string,
+  userId: string,
+  transcriptionModel: string = 'whisper-1',
+  language?: string,
+  temperature?: number
+): Promise<TranscriptionResponse> {
   const jobId = uuidv4();
   console.log(`🎵 Starting job ${jobId} for URL: ${youtubeUrl}`);
 
@@ -521,7 +500,7 @@ app.post('/transcribe', async (req, res) => {
       }
     }, 60 * 60 * 1000);
 
-    res.json(result);
+    return result;
 
   } catch (error) {
     console.error(`❌ Error for job ${jobId}:`, error);
@@ -536,9 +515,172 @@ app.post('/transcribe', async (req, res) => {
       console.error('Cleanup error:', cleanupError);
     }
 
-    res.status(500).json({
+    return {
       success: false,
       jobId,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    };
+  }
+}
+
+/**
+ * Process multiple videos from a YouTube channel
+ */
+async function processChannelVideos(
+  channelUrl: string,
+  userId: string,
+  transcriptionModel: string = 'whisper-1',
+  language?: string,
+  temperature?: number
+): Promise<TranscriptionResponse> {
+  console.log(`🎬 Processing channel: ${channelUrl}`);
+  
+  try {
+    // Get video URLs from channel (last 10 uploaded)
+    const videoUrls = await getChannelVideos(channelUrl, 10);
+    
+    if (!videoUrls || videoUrls.length === 0) {
+      return {
+        success: false,
+        isChannel: true,
+        channelUrl,
+        error: 'No videos found in channel or failed to extract videos'
+      };
+    }
+
+    console.log(`📺 Found ${videoUrls.length} videos to process from channel`);
+    
+    const jobIds: string[] = [];
+    let processedCount = 0;
+    let failedCount = 0;
+
+    // Process videos sequentially to avoid overwhelming the system
+    for (let i = 0; i < videoUrls.length; i++) {
+      const videoUrl = videoUrls[i];
+      console.log(`\n🎵 Processing video ${i + 1}/${videoUrls.length}: ${videoUrl}`);
+      
+      try {
+        const result = await processSingleVideo(
+          videoUrl,
+          userId,
+          transcriptionModel,
+          language,
+          temperature
+        );
+        
+        if (result.success && result.jobId) {
+          jobIds.push(result.jobId);
+          processedCount++;
+          console.log(`✅ Video ${i + 1}/${videoUrls.length} processed successfully: ${result.jobId}`);
+        } else {
+          failedCount++;
+          console.log(`❌ Video ${i + 1}/${videoUrls.length} failed: ${result.error}`);
+        }
+        
+      } catch (error) {
+        failedCount++;
+        console.error(`❌ Video ${i + 1}/${videoUrls.length} failed with exception:`, error);
+      }
+    }
+
+    console.log(`\n🎉 Channel processing complete: ${processedCount}/${videoUrls.length} videos processed successfully`);
+
+    return {
+      success: true,
+      isChannel: true,
+      channelUrl,
+      jobIds,
+      videosProcessed: processedCount,
+      totalVideos: videoUrls.length,
+      error: failedCount > 0 ? `${failedCount} video(s) failed to process` : undefined
+    };
+
+  } catch (error) {
+    console.error(`❌ Channel processing failed:`, error);
+    return {
+      success: false,
+      isChannel: true,
+      channelUrl,
+      error: error instanceof Error ? error.message : 'Channel processing failed'
+    };
+  }
+}
+
+/**
+ * Health check endpoint
+ */
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    service: 'YouTube Transcription Service',
+    timestamp: new Date().toISOString()
+  });
+});
+
+/**
+ * Download YouTube video and transcribe
+ * Supports both single videos and channel URLs
+ */
+app.post('/transcribe', async (req, res) => {
+  const { youtubeUrl, userId, transcriptionModel = 'whisper-1', language, temperature }: TranscriptionRequest = req.body;
+  
+  if (!youtubeUrl) {
+    return res.status(400).json({
+      success: false,
+      error: 'youtubeUrl is required'
+    });
+  }
+
+  if (!userId) {
+    return res.status(400).json({
+      success: false,
+      error: 'userId is required'
+    });
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(500).json({
+      success: false,
+      error: 'OPENAI_API_KEY not configured'
+    });
+  }
+
+  try {
+    // Detect if URL is a channel or single video
+    if (isChannelUrl(youtubeUrl)) {
+      console.log(`🎬 Channel URL detected: ${youtubeUrl}`);
+      
+      // Process channel videos
+      const result = await processChannelVideos(
+        youtubeUrl,
+        userId,
+        transcriptionModel,
+        language,
+        temperature
+      );
+      
+      return res.json(result);
+      
+    } else {
+      console.log(`🎵 Single video URL detected: ${youtubeUrl}`);
+      
+      // Process single video
+      const result = await processSingleVideo(
+        youtubeUrl,
+        userId,
+        transcriptionModel,
+        language,
+        temperature
+      );
+      
+      return res.json(result);
+    }
+    
+  } catch (error) {
+    console.error(`❌ Transcription endpoint error:`, error);
+    
+    return res.status(500).json({
+      success: false,
       error: error instanceof Error ? error.message : 'Unknown error'
     });
   }

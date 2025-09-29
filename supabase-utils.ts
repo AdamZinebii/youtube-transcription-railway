@@ -46,6 +46,65 @@ export const supabase = supabaseUrl && supabaseKey
   : null;
 
 /**
+ * Check if URL is a YouTube channel URL
+ */
+export function isChannelUrl(url: string): boolean {
+  const channelPatterns = [
+    /youtube\.com\/@[^\/]+/,           // @channelname format
+    /youtube\.com\/c\/[^\/]+/,         // /c/channelname format  
+    /youtube\.com\/channel\/[^\/]+/,   // /channel/UCxxxxx format
+    /youtube\.com\/user\/[^\/]+/,      // /user/username format (legacy)
+  ];
+  
+  return channelPatterns.some(pattern => pattern.test(url));
+}
+
+/**
+ * Extract last 10 video URLs from a YouTube channel
+ */
+export async function getChannelVideos(channelUrl: string, limit: number = 10): Promise<string[] | null> {
+  try {
+    const { exec } = require('child_process');
+    const { promisify } = require('util');
+    const execAsync = promisify(exec);
+
+    console.log(`🔍 Extracting ${limit} latest videos from channel: ${channelUrl}`);
+    
+    // Ensure we're looking at the videos page
+    let videosUrl = channelUrl;
+    if (!channelUrl.includes('/videos')) {
+      videosUrl = `${channelUrl}/videos`;
+    }
+
+    // Use the command provided by the user
+    const command = `yt-dlp --flat-playlist -j "${videosUrl}" | head -n ${limit} | jq -r '.url'`;
+    
+    const { stdout } = await execAsync(command, { 
+      maxBuffer: 5 * 1024 * 1024, // 5MB buffer
+      timeout: 60000 // 1 minute timeout
+    });
+
+    const videoIds = stdout.trim().split('\n').filter((id: string) => id && id !== 'null');
+    
+    // Convert video IDs to full URLs
+    const fullUrls = videoIds.map((id: string) => {
+      if (id.startsWith('http')) {
+        return id;
+      } else {
+        return `https://www.youtube.com/watch?v=${id}`;
+      }
+    });
+
+    console.log(`✅ Found ${fullUrls.length} videos from channel`);
+    return fullUrls.length > 0 ? fullUrls : null;
+
+  } catch (error) {
+    console.error('❌ Failed to extract channel videos:', error);
+    return null;
+  }
+}
+
+/**
  * Extraire les métadonnées d'une vidéo YouTube avec yt-dlp
  */
 export async function getYouTubeMetadata(youtubeUrl: string): Promise<{
