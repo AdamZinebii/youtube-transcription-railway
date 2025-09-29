@@ -73,7 +73,7 @@ export async function getYouTubeMetadata(youtubeUrl: string): Promise<{
       'duration', 'upload_date', 'thumbnail'
     ].join(',');
     
-    const command = `yt-dlp --print-json --no-download --skip-playlist "${youtubeUrl}"`;
+    const command = `yt-dlp --skip-download --print-json "${youtubeUrl}"`;
     
     // Increase maxBuffer to 10MB and add timeout
     const { stdout } = await execAsync(command, { 
@@ -111,7 +111,7 @@ export async function getYouTubeMetadata(youtubeUrl: string): Promise<{
       const execAsync = promisify(exec);
       
       // Use print template to get only specific fields we need
-      const command = `yt-dlp --print "%(id)s|||%(title)s|||%(uploader)s|||%(view_count)s|||%(like_count)s|||%(duration)s|||%(thumbnail)s|||%(upload_date)s|||%(description)s" --no-download --skip-playlist "${youtubeUrl}"`;
+      const command = `yt-dlp --skip-download --print "%(id)s|||%(title)s|||%(uploader)s|||%(view_count)s|||%(like_count)s|||%(duration)s|||%(thumbnail)s|||%(upload_date)s|||%(description)s" "${youtubeUrl}"`;
       
       const { stdout } = await execAsync(command, { 
         maxBuffer: 1024 * 1024, // 1MB buffer should be enough for simple output
@@ -193,53 +193,120 @@ export async function uploadTranscriptionToSupabase(
 }
 
 /**
- * Download and upload thumbnail to Supabase Storage
+ * Download and upload thumbnail to Supabase Storage using yt-dlp
  */
 export async function uploadThumbnailToSupabase(
   jobId: string,
-  thumbnailUrl: string
+  youtubeUrl: string,
+  thumbnailUrl?: string
 ): Promise<string | null> {
-  if (!supabase || !thumbnailUrl) {
-    console.warn('⚠️ Supabase not configured or no thumbnail URL provided');
+  if (!supabase) {
+    console.warn('⚠️ Supabase not configured');
     return null;
   }
 
   try {
     console.log(`📸 Downloading thumbnail for job: ${jobId}`);
     
-    // Download thumbnail from YouTube
-    const thumbnailBuffer = await downloadThumbnail(thumbnailUrl);
-    if (!thumbnailBuffer) {
-      console.error('❌ Failed to download thumbnail');
-      return null;
-    }
-
-    // Get file extension from URL or default to jpg
-    const urlParts = new URL(thumbnailUrl);
-    const pathParts = urlParts.pathname.split('.');
-    const extension = pathParts.length > 1 ? pathParts[pathParts.length - 1] : 'jpg';
-    const fileName = `${jobId}_thumbnail.${extension}`;
+    // Method 1: Use yt-dlp to download thumbnail directly (more reliable)
+    const { exec } = require('child_process');
+    const { promisify } = require('util');
+    const execAsync = promisify(exec);
     
-    // Upload to thumbnails bucket
-    const { data, error } = await supabase.storage
-      .from('thumbnails')
-      .upload(fileName, thumbnailBuffer, {
-        contentType: `image/${extension === 'jpg' ? 'jpeg' : extension}`,
-        upsert: true
-      });
-
-    if (error) {
-      console.error('❌ Thumbnail upload error:', error);
-      return null;
+    const tempDir = `/tmp/${jobId}_thumb`;
+    const fs = require('fs');
+    
+    // Create temporary directory
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
     }
+    
+    // Download thumbnail using yt-dlp
+    const command = `yt-dlp --write-thumbnail --skip-download --output "${tempDir}/thumbnail.%(ext)s" "${youtubeUrl}"`;
+    
+    try {
+      await execAsync(command, { timeout: 30000 });
+      
+      // Find the downloaded thumbnail file
+      const files = fs.readdirSync(tempDir);
+      const thumbnailFile = files.find((file: string) => file.startsWith('thumbnail.'));
+      
+      if (!thumbnailFile) {
+        throw new Error('Thumbnail file not found after download');
+      }
+      
+      const thumbnailPath = `${tempDir}/${thumbnailFile}`;
+      const thumbnailBuffer = fs.readFileSync(thumbnailPath);
+      const extension = thumbnailFile.split('.').pop() || 'jpg';
+      const fileName = `${jobId}_thumbnail.${extension}`;
+      
+      // Upload to thumbnails bucket
+      const { data, error } = await supabase.storage
+        .from('thumbnails')
+        .upload(fileName, thumbnailBuffer, {
+          contentType: `image/${extension === 'jpg' ? 'jpeg' : extension}`,
+          upsert: true
+        });
 
-    // Get public URL
-    const { data: urlData } = supabase.storage
-      .from('thumbnails')
-      .getPublicUrl(fileName);
+      if (error) {
+        throw error;
+      }
 
-    console.log('✅ Thumbnail uploaded to Supabase:', urlData.publicUrl);
-    return urlData.publicUrl;
+      // Cleanup temp directory
+      fs.rmSync(tempDir, { recursive: true, force: true });
+
+      // Get public URL
+      const { data: urlData } = supabase.storage
+        .from('thumbnails')
+        .getPublicUrl(fileName);
+
+      console.log('✅ Thumbnail uploaded to Supabase via yt-dlp:', urlData.publicUrl);
+      return urlData.publicUrl;
+      
+    } catch (ytdlpError) {
+      console.log('⚠️ yt-dlp thumbnail download failed, trying HTTP method...');
+      
+      // Cleanup temp directory if it exists
+      if (fs.existsSync(tempDir)) {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+      
+      // Fallback to HTTP download if thumbnail URL is provided
+      if (!thumbnailUrl) {
+        throw new Error('No thumbnail URL available for HTTP fallback');
+      }
+      
+      const thumbnailBuffer = await downloadThumbnail(thumbnailUrl);
+      if (!thumbnailBuffer) {
+        throw new Error('Failed to download thumbnail via HTTP');
+      }
+
+      // Get file extension from URL or default to jpg
+      const urlParts = new URL(thumbnailUrl);
+      const pathParts = urlParts.pathname.split('.');
+      const extension = pathParts.length > 1 ? pathParts[pathParts.length - 1] : 'jpg';
+      const fileName = `${jobId}_thumbnail.${extension}`;
+      
+      // Upload to thumbnails bucket
+      const { data, error } = await supabase.storage
+        .from('thumbnails')
+        .upload(fileName, thumbnailBuffer, {
+          contentType: `image/${extension === 'jpg' ? 'jpeg' : extension}`,
+          upsert: true
+        });
+
+      if (error) {
+        throw error;
+      }
+
+      // Get public URL
+      const { data: urlData } = supabase.storage
+        .from('thumbnails')
+        .getPublicUrl(fileName);
+
+      console.log('✅ Thumbnail uploaded to Supabase via HTTP fallback:', urlData.publicUrl);
+      return urlData.publicUrl;
+    }
     
   } catch (error) {
     console.error('❌ Thumbnail upload failed:', error);

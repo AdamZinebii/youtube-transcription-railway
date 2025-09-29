@@ -414,18 +414,14 @@ app.post('/transcribe', async (req, res) => {
       transcriptData.text
     );
 
-    // Upload thumbnail to Supabase Storage
+    // Upload thumbnail to Supabase Storage - now using yt-dlp method
     let thumbnailUrl: string | null = null;
-    if (youtubeMetadata?.thumbnail) {
-      console.log(`📸 Uploading thumbnail for job: ${jobId} - URL: ${youtubeMetadata.thumbnail.substring(0, 100)}...`);
-      thumbnailUrl = await uploadThumbnailToSupabase(jobId, youtubeMetadata.thumbnail);
-      if (thumbnailUrl) {
-        console.log(`✅ Thumbnail uploaded successfully: ${thumbnailUrl}`);
-      } else {
-        console.log(`❌ Thumbnail upload failed for job: ${jobId}`);
-      }
+    console.log(`📸 Attempting thumbnail upload for job: ${jobId}`);
+    thumbnailUrl = await uploadThumbnailToSupabase(jobId, youtubeUrl, youtubeMetadata?.thumbnail);
+    if (thumbnailUrl) {
+      console.log(`✅ Thumbnail uploaded successfully: ${thumbnailUrl}`);
     } else {
-      console.log(`⚠️ Skipping thumbnail upload - no thumbnail URL available for job: ${jobId}`);
+      console.log(`❌ Thumbnail upload failed for job: ${jobId}`);
     }
 
     // Sauvegarder les métadonnées dans la table Supabase
