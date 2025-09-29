@@ -76,24 +76,18 @@ export async function getChannelVideos(channelUrl: string, limit: number = 10): 
       videosUrl = `${channelUrl}/videos`;
     }
 
-    // Use the command provided by the user
-    const command = `yt-dlp --flat-playlist -j "${videosUrl}" | head -n ${limit} | jq -r '.url'`;
+    // Use yt-dlp's --print option instead of jq (jq not available on Railway)
+    const command = `yt-dlp --flat-playlist --print "%(id)s" "${videosUrl}" 2>/dev/null | head -n ${limit}`;
     
     const { stdout } = await execAsync(command, { 
       maxBuffer: 5 * 1024 * 1024, // 5MB buffer
       timeout: 60000 // 1 minute timeout
     });
 
-    const videoIds = stdout.trim().split('\n').filter((id: string) => id && id !== 'null');
+    const videoIds = stdout.trim().split('\n').filter((id: string) => id && id !== 'null' && id.length > 0);
     
-    // Convert video IDs to full URLs
-    const fullUrls = videoIds.map((id: string) => {
-      if (id.startsWith('http')) {
-        return id;
-      } else {
-        return `https://www.youtube.com/watch?v=${id}`;
-      }
-    });
+    // Convert video IDs to full YouTube URLs
+    const fullUrls = videoIds.map((id: string) => `https://www.youtube.com/watch?v=${id.trim()}`);
 
     console.log(`✅ Found ${fullUrls.length} videos from channel`);
     return fullUrls.length > 0 ? fullUrls : null;
