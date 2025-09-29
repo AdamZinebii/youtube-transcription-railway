@@ -1,5 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 import fs from 'fs';
+import https from 'https';
+import http from 'http';
+import path from 'path';
 
 // Types pour la base de données
 export interface VideoMetadata {
@@ -15,6 +18,8 @@ export interface VideoMetadata {
   channelUrl?: string;
   durationSeconds?: number;
   uploadDate?: string;
+  thumbnail?: string;
+  thumbnailUrl?: string; // URL from Supabase storage
   transcriptionFilePath: string;
   transcriptionText: string;
   language?: string;
@@ -54,19 +59,31 @@ export async function getYouTubeMetadata(youtubeUrl: string): Promise<{
   channelUrl?: string;
   durationSeconds?: number;
   uploadDate?: string;
+  thumbnail?: string;
 } | null> {
   try {
     const { exec } = require('child_process');
     const { promisify } = require('util');
     const execAsync = promisify(exec);
 
-    // Commande yt-dlp pour récupérer les métadonnées en JSON
-    const command = `yt-dlp --print-json --no-download "${youtubeUrl}"`;
-    const { stdout } = await execAsync(command);
+    // Option 1: Use specific print format to get only essential metadata
+    const specificFields = [
+      'id', 'title', 'description', 'view_count', 'like_count', 
+      'uploader', 'channel', 'uploader_url', 'channel_url', 
+      'duration', 'upload_date', 'thumbnail'
+    ].join(',');
+    
+    const command = `yt-dlp --print-json --no-download --skip-playlist "${youtubeUrl}"`;
+    
+    // Increase maxBuffer to 10MB and add timeout
+    const { stdout } = await execAsync(command, { 
+      maxBuffer: 10 * 1024 * 1024, // 10MB buffer
+      timeout: 30000 // 30 second timeout
+    });
     
     const metadata = JSON.parse(stdout);
     
-    return {
+    const result = {
       videoId: metadata.id,
       title: metadata.title,
       description: metadata.description?.substring(0, 1000), // Limiter à 1000 caractères
@@ -77,11 +94,56 @@ export async function getYouTubeMetadata(youtubeUrl: string): Promise<{
       durationSeconds: metadata.duration,
       uploadDate: metadata.upload_date ? 
         `${metadata.upload_date.substring(0,4)}-${metadata.upload_date.substring(4,6)}-${metadata.upload_date.substring(6,8)}` : 
-        undefined
+        undefined,
+      thumbnail: metadata.thumbnail
     };
+    
+    console.log(`📸 Primary method - Thumbnail URL: ${result.thumbnail ? 'Found' : 'Not found'} - ${result.thumbnail?.substring(0, 50)}...`);
+    return result;
   } catch (error) {
     console.error('❌ Failed to get YouTube metadata:', error);
-    return null;
+    
+    // Fallback: Try with minimal output format
+    try {
+      console.log('🔄 Trying fallback method for metadata extraction...');
+      const { exec } = require('child_process');
+      const { promisify } = require('util');
+      const execAsync = promisify(exec);
+      
+      // Use print template to get only specific fields we need
+      const command = `yt-dlp --print "%(id)s|||%(title)s|||%(uploader)s|||%(view_count)s|||%(like_count)s|||%(duration)s|||%(thumbnail)s|||%(upload_date)s|||%(description)s" --no-download --skip-playlist "${youtubeUrl}"`;
+      
+      const { stdout } = await execAsync(command, { 
+        maxBuffer: 1024 * 1024, // 1MB buffer should be enough for simple output
+        timeout: 30000
+      });
+      
+      const parts = stdout.trim().split('|||');
+      if (parts.length >= 6) {
+        const result = {
+          videoId: parts[0] || '',
+          title: parts[1] || 'Unknown Title',
+          channelName: parts[2] || undefined,
+          views: parts[3] ? parseInt(parts[3]) : undefined,
+          likes: parts[4] ? parseInt(parts[4]) : undefined,
+          durationSeconds: parts[5] ? parseInt(parts[5]) : undefined,
+          thumbnail: parts[6] || undefined,
+          uploadDate: parts[7] && parts[7] !== 'NA' ? 
+            `${parts[7].substring(0,4)}-${parts[7].substring(4,6)}-${parts[7].substring(6,8)}` : 
+            undefined,
+          description: parts[8] ? parts[8].substring(0, 1000) : undefined
+        };
+        
+        console.log(`📸 Fallback method - Thumbnail URL: ${result.thumbnail ? 'Found' : 'Not found'} - ${result.thumbnail?.substring(0, 50)}...`);
+        console.log(`🔍 Fallback method - Parts array length: ${parts.length}, Part[6]: ${parts[6]}`);
+        return result;
+      }
+      
+      return null;
+    } catch (fallbackError) {
+      console.error('❌ Fallback metadata extraction also failed:', fallbackError);
+      return null;
+    }
   }
 }
 
@@ -128,6 +190,94 @@ export async function uploadTranscriptionToSupabase(
     console.error('❌ Upload to Supabase failed:', error);
     return null;
   }
+}
+
+/**
+ * Download and upload thumbnail to Supabase Storage
+ */
+export async function uploadThumbnailToSupabase(
+  jobId: string,
+  thumbnailUrl: string
+): Promise<string | null> {
+  if (!supabase || !thumbnailUrl) {
+    console.warn('⚠️ Supabase not configured or no thumbnail URL provided');
+    return null;
+  }
+
+  try {
+    console.log(`📸 Downloading thumbnail for job: ${jobId}`);
+    
+    // Download thumbnail from YouTube
+    const thumbnailBuffer = await downloadThumbnail(thumbnailUrl);
+    if (!thumbnailBuffer) {
+      console.error('❌ Failed to download thumbnail');
+      return null;
+    }
+
+    // Get file extension from URL or default to jpg
+    const urlParts = new URL(thumbnailUrl);
+    const pathParts = urlParts.pathname.split('.');
+    const extension = pathParts.length > 1 ? pathParts[pathParts.length - 1] : 'jpg';
+    const fileName = `${jobId}_thumbnail.${extension}`;
+    
+    // Upload to thumbnails bucket
+    const { data, error } = await supabase.storage
+      .from('thumbnails')
+      .upload(fileName, thumbnailBuffer, {
+        contentType: `image/${extension === 'jpg' ? 'jpeg' : extension}`,
+        upsert: true
+      });
+
+    if (error) {
+      console.error('❌ Thumbnail upload error:', error);
+      return null;
+    }
+
+    // Get public URL
+    const { data: urlData } = supabase.storage
+      .from('thumbnails')
+      .getPublicUrl(fileName);
+
+    console.log('✅ Thumbnail uploaded to Supabase:', urlData.publicUrl);
+    return urlData.publicUrl;
+    
+  } catch (error) {
+    console.error('❌ Thumbnail upload failed:', error);
+    return null;
+  }
+}
+
+/**
+ * Download thumbnail from URL
+ */
+async function downloadThumbnail(url: string): Promise<Buffer | null> {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('https:') ? https : http;
+    
+    client.get(url, (response) => {
+      if (response.statusCode !== 200) {
+        console.error(`❌ Failed to download thumbnail: HTTP ${response.statusCode}`);
+        resolve(null);
+        return;
+      }
+
+      const data: Buffer[] = [];
+      
+      response.on('data', (chunk: Buffer) => {
+        data.push(chunk);
+      });
+      
+      response.on('end', () => {
+        const buffer = Buffer.concat(data);
+        console.log(`✅ Downloaded thumbnail: ${buffer.length} bytes`);
+        resolve(buffer);
+      });
+      
+    }).on('error', (error) => {
+      console.error('❌ Error downloading thumbnail:', error);
+      resolve(null);
+    });
+  });
 }
 
 /**
@@ -229,6 +379,8 @@ export async function saveVideoMetadataToSupabase(metadata: VideoMetadata): Prom
         channel_url: metadata.channelUrl,
         duration_seconds: metadata.durationSeconds,
         upload_date: metadata.uploadDate,
+        thumbnail: metadata.thumbnail,
+        thumbnail_url: metadata.thumbnailUrl,
         transcription_file_path: metadata.transcriptionFilePath,
         transcription_text: metadata.transcriptionText,
         language: metadata.language,

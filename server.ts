@@ -9,6 +9,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { 
   getYouTubeMetadata, 
   uploadTranscriptionToSupabase, 
+  uploadThumbnailToSupabase,
   createInitialVideoRecord,
   updateVideoStatus,
   saveVideoMetadataToSupabase,
@@ -294,6 +295,15 @@ app.post('/transcribe', async (req, res) => {
   // Récupérer les métadonnées YouTube d'abord
   console.log(`📋 Getting YouTube metadata for job ${jobId}`);
   const youtubeMetadata = await getYouTubeMetadata(youtubeUrl);
+  
+  if (youtubeMetadata) {
+    console.log(`✅ YouTube metadata retrieved: Title="${youtubeMetadata.title}", Thumbnail=${youtubeMetadata.thumbnail ? 'Present' : 'Missing'}`);
+    if (youtubeMetadata.thumbnail) {
+      console.log(`📸 Thumbnail URL: ${youtubeMetadata.thumbnail.substring(0, 100)}...`);
+    }
+  } else {
+    console.log(`❌ Failed to retrieve YouTube metadata`);
+  }
 
   try {
     // 🔄 Mettre à jour le statut à "Ingestion"
@@ -404,6 +414,20 @@ app.post('/transcribe', async (req, res) => {
       transcriptData.text
     );
 
+    // Upload thumbnail to Supabase Storage
+    let thumbnailUrl: string | null = null;
+    if (youtubeMetadata?.thumbnail) {
+      console.log(`📸 Uploading thumbnail for job: ${jobId} - URL: ${youtubeMetadata.thumbnail.substring(0, 100)}...`);
+      thumbnailUrl = await uploadThumbnailToSupabase(jobId, youtubeMetadata.thumbnail);
+      if (thumbnailUrl) {
+        console.log(`✅ Thumbnail uploaded successfully: ${thumbnailUrl}`);
+      } else {
+        console.log(`❌ Thumbnail upload failed for job: ${jobId}`);
+      }
+    } else {
+      console.log(`⚠️ Skipping thumbnail upload - no thumbnail URL available for job: ${jobId}`);
+    }
+
     // Sauvegarder les métadonnées dans la table Supabase
     if (youtubeMetadata && supabaseUrl) {
       const videoMetadata: VideoMetadata = {
@@ -419,6 +443,8 @@ app.post('/transcribe', async (req, res) => {
         channelUrl: youtubeMetadata.channelUrl,
         durationSeconds: youtubeMetadata.durationSeconds,
         uploadDate: youtubeMetadata.uploadDate,
+        thumbnail: youtubeMetadata.thumbnail,
+        thumbnailUrl: thumbnailUrl || undefined,
         transcriptionFilePath: supabaseUrl,
         transcriptionText: transcriptData.text,
         language: transcriptData.language,
