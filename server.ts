@@ -505,6 +505,10 @@ async function processSingleVideo(
   } catch (error) {
     console.error(`❌ Error for job ${jobId}:`, error);
     
+    // Set status to Failed in database
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred during processing';
+    await updateVideoStatus(jobId, 'Failed', errorMessage);
+    
     // Cleanup on error
     const outputPath = path.join(uploadsDir, `${jobId}.mp3`);
     try {
@@ -518,7 +522,7 @@ async function processSingleVideo(
     return {
       success: false,
       jobId,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: errorMessage
     };
   }
 }

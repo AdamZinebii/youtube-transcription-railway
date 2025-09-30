@@ -501,19 +501,30 @@ export async function updateInitialVideoMetadata(
 /**
  * Mettre à jour le statut d'une vidéo
  */
-export async function updateVideoStatus(jobId: string, status: 'Upload' | 'Ingestion' | 'Processing' | 'Ready'): Promise<boolean> {
+export async function updateVideoStatus(
+  jobId: string, 
+  status: 'Upload' | 'Ingestion' | 'Processing' | 'Ready' | 'Failed',
+  errorMessage?: string
+): Promise<boolean> {
   if (!supabase) {
     console.warn('⚠️ Supabase not configured, skipping status update');
     return false;
   }
 
   try {
+    const updateData: any = { 
+      status,
+      updated_at: new Date().toISOString()
+    };
+
+    // Add error message if status is Failed
+    if (status === 'Failed' && errorMessage) {
+      updateData.error_message = errorMessage;
+    }
+
     const { error } = await supabase
       .from('video_transcriptions')
-      .update({ 
-        status,
-        updated_at: new Date().toISOString()
-      })
+      .update(updateData)
       .eq('job_id', jobId);
 
     if (error) {
@@ -522,6 +533,9 @@ export async function updateVideoStatus(jobId: string, status: 'Upload' | 'Inges
     }
 
     console.log(`✅ Video status updated to: ${status}`);
+    if (errorMessage) {
+      console.log(`   Error message: ${errorMessage}`);
+    }
     return true;
     
   } catch (error) {
@@ -735,21 +749,27 @@ export async function processVideoThroughAIFunctions(videoTranscriptionId: strin
     // Step 1: Segment the transcript using Claude
     const segmentationSuccess = await callTranscriptSegmenter(videoTranscriptionId);
     if (!segmentationSuccess) {
-      console.error('❌ Transcript segmentation failed, stopping pipeline');
+      const errorMsg = 'Transcript segmentation failed';
+      console.error(`❌ ${errorMsg}, stopping pipeline`);
+      await updateVideoStatus(jobId, 'Failed', errorMsg);
       return false;
     }
 
     // Step 2: Create video-level embeddings
     const videoEmbedSuccess = await callEmbedVideo(videoTranscriptionId);
     if (!videoEmbedSuccess) {
-      console.error('❌ Video embedding failed, stopping pipeline');
+      const errorMsg = 'Video embedding failed';
+      console.error(`❌ ${errorMsg}, stopping pipeline`);
+      await updateVideoStatus(jobId, 'Failed', errorMsg);
       return false;
     }
 
     // Step 3: Create segment-level embeddings
     const segmentEmbedSuccess = await callEmbedSegments(videoTranscriptionId);
     if (!segmentEmbedSuccess) {
-      console.error('❌ Segment embedding failed, stopping pipeline');
+      const errorMsg = 'Segment embedding failed';
+      console.error(`❌ ${errorMsg}, stopping pipeline`);
+      await updateVideoStatus(jobId, 'Failed', errorMsg);
       return false;
     }
 
@@ -760,7 +780,9 @@ export async function processVideoThroughAIFunctions(videoTranscriptionId: strin
     return true;
 
   } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'AI processing pipeline failed';
     console.error('❌ AI processing pipeline failed:', error);
+    await updateVideoStatus(jobId, 'Failed', errorMsg);
     return false;
   }
 }
