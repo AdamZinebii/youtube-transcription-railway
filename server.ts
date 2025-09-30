@@ -30,6 +30,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors({
   origin: [
     'https://chatgenius-app.vercel.app',
+    'https://bravideo.vercel.app',  // Production domain
     'http://localhost:3000',
     'http://localhost:5173'
   ],
