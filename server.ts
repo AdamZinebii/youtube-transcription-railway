@@ -575,40 +575,250 @@ async function processChannelVideos(
 
     console.log(`📺 Found ${videoUrls.length} videos to process from channel`);
     
+    // ========================================
+    // PHASE 1: Get metadata for ALL videos first
+    // ========================================
+    console.log(`\n📋 PHASE 1: Fetching metadata for all ${videoUrls.length} videos...`);
+    
+    interface VideoPreparation {
+      videoUrl: string;
+      jobId: string;
+      metadata: NonNullable<Awaited<ReturnType<typeof getYouTubeMetadata>>>;
+      thumbnailUrl: string | null;
+    }
+    
+    const preparedVideos: VideoPreparation[] = [];
+    
+    for (let i = 0; i < videoUrls.length; i++) {
+      const videoUrl = videoUrls[i];
+      const jobId = uuidv4();
+      
+      console.log(`📋 [${i + 1}/${videoUrls.length}] Getting metadata for: ${videoUrl}`);
+      
+      try {
+        // Get metadata
+        const metadata = await getYouTubeMetadata(videoUrl);
+        
+        if (!metadata) {
+          console.warn(`⚠️ Failed to get metadata for video ${i + 1}, skipping`);
+          continue;
+        }
+        
+        console.log(`✅ Metadata: "${metadata.title}"`);
+        
+        // Create initial database record with Upload status
+        await createInitialVideoRecord(jobId, videoUrl, userId);
+        
+        // Upload thumbnail
+        const thumbnailUrl = await uploadThumbnailToSupabase(jobId, videoUrl, metadata.thumbnail);
+        
+        // Update record with metadata
+        await updateInitialVideoMetadata(jobId, {
+          title: metadata.title,
+          description: metadata.description,
+          views: metadata.views,
+          likes: metadata.likes,
+          channelName: metadata.channelName,
+          channelUrl: metadata.channelUrl,
+          durationSeconds: metadata.durationSeconds,
+          uploadDate: metadata.uploadDate,
+          thumbnailUrl: thumbnailUrl || undefined
+        });
+        
+        preparedVideos.push({
+          videoUrl,
+          jobId,
+          metadata,
+          thumbnailUrl
+        });
+        
+        console.log(`✅ [${i + 1}/${videoUrls.length}] Prepared: ${metadata.title} (${jobId})`);
+        
+      } catch (error) {
+        console.error(`❌ Failed to prepare video ${i + 1}:`, error);
+      }
+    }
+    
+    console.log(`\n✅ PHASE 1 Complete: ${preparedVideos.length}/${videoUrls.length} videos prepared with metadata`);
+    
+    if (preparedVideos.length === 0) {
+      return {
+        success: false,
+        isChannel: true,
+        channelUrl,
+        error: 'Failed to prepare any videos - metadata extraction failed for all'
+      };
+    }
+    
+    // ========================================
+    // PHASE 2: Process each video sequentially (download → transcribe → AI)
+    // ========================================
+    console.log(`\n🎵 PHASE 2: Processing ${preparedVideos.length} videos...`);
+    
     const jobIds: string[] = [];
     let processedCount = 0;
     let failedCount = 0;
 
-    // Process videos sequentially to avoid overwhelming the system
-    for (let i = 0; i < videoUrls.length; i++) {
-      const videoUrl = videoUrls[i];
-      console.log(`\n🎵 Processing video ${i + 1}/${videoUrls.length}: ${videoUrl}`);
+    for (let i = 0; i < preparedVideos.length; i++) {
+      const { videoUrl, jobId, metadata, thumbnailUrl } = preparedVideos[i];
+      
+      console.log(`\n🎵 [${i + 1}/${preparedVideos.length}] Processing: ${metadata.title}`);
+      console.log(`   Job ID: ${jobId}`);
+      console.log(`   URL: ${videoUrl}`);
       
       try {
-        const result = await processSingleVideo(
-          videoUrl,
-          userId,
-          transcriptionModel,
-          language,
-          temperature
+        // Move to Ingestion status
+        await updateVideoStatus(jobId, 'Ingestion');
+        
+        // Download MP3
+        const filename = `${jobId}.mp3`;
+        const outputPath = path.join(uploadsDir, filename);
+        
+        const command = `yt-dlp -f "bestaudio[ext=m4a]/bestaudio/best" --extract-audio --audio-format mp3 --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" --referer "https://www.youtube.com/" "${videoUrl}" -o "${outputPath.replace('.mp3', '.%(ext)s')}"`;
+        
+        console.log(`📥 Downloading MP3...`);
+        await execAsync(command, { timeout: 300000 });
+        
+        if (!fs.existsSync(outputPath)) {
+          throw new Error('MP3 file was not created');
+        }
+        
+        console.log(`✅ MP3 downloaded`);
+        
+        // Transcribe
+        console.log(`🎙️ Starting transcription...`);
+        const duration = await getAudioDuration(outputPath);
+        console.log(`🎵 Audio duration: ${duration.toFixed(2)} seconds`);
+        
+        const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        const isGPT4oModel = transcriptionModel.includes('gpt-4o');
+        const maxDuration = isGPT4oModel ? 1400 : 3600;
+        
+        let transcriptData;
+        
+        if (duration >= maxDuration) {
+          console.log(`⚠️ Using chunked transcription`);
+          const tempDir = path.join(path.dirname(outputPath), 'chunks');
+          if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir, { recursive: true });
+          }
+          
+          const chunkPaths = await splitAudioFile(outputPath, tempDir, maxDuration);
+          transcriptData = await transcribeAudioChunksParallel(
+            chunkPaths,
+            {
+              apiKey: process.env.OPENAI_API_KEY!,
+              model: transcriptionModel,
+              language: language,
+              temperature: temperature ?? 0
+            },
+            maxDuration
+          );
+          
+          fs.rmSync(tempDir, { recursive: true, force: true });
+        } else {
+          const transcription = await openai.audio.transcriptions.create({
+            file: fs.createReadStream(outputPath),
+            model: transcriptionModel,
+            response_format: isGPT4oModel ? 'json' : 'verbose_json',
+            timestamp_granularities: isGPT4oModel ? undefined : ['segment'],
+            language: language,
+            temperature: temperature ?? 0,
+          });
+
+          transcriptData = {
+            text: transcription.text,
+            segments: (transcription as any).segments,
+            language: (transcription as any).language,
+            duration: (transcription as any).duration,
+            usage: (transcription as any).usage,
+            chunksProcessed: 1
+          };
+        }
+        
+        console.log(`✅ Transcription completed`);
+        
+        // Upload transcription to Supabase
+        const supabaseUrl = await uploadTranscriptionToSupabase(
+          jobId,
+          transcriptData,
+          transcriptData.text
         );
         
-        if (result.success && result.jobId) {
-          jobIds.push(result.jobId);
-          processedCount++;
-          console.log(`✅ Video ${i + 1}/${videoUrls.length} processed successfully: ${result.jobId}`);
-        } else {
-          failedCount++;
-          console.log(`❌ Video ${i + 1}/${videoUrls.length} failed: ${result.error}`);
+        // Save final metadata
+        if (supabaseUrl) {
+          const videoMetadata: VideoMetadata = {
+            jobId,
+            youtubeUrl: videoUrl,
+            userId,
+            videoId: metadata.videoId,
+            title: metadata.title,
+            description: metadata.description,
+            views: metadata.views,
+            likes: metadata.likes,
+            channelName: metadata.channelName,
+            channelUrl: metadata.channelUrl,
+            durationSeconds: metadata.durationSeconds,
+            uploadDate: metadata.uploadDate,
+            thumbnailUrl: thumbnailUrl || undefined,
+            transcriptionFilePath: supabaseUrl,
+            transcriptionText: transcriptData.text,
+            language: transcriptData.language,
+            segmentsCount: transcriptData.segments?.length,
+            transcriptionModel,
+            openaiTokensUsed: transcriptData.usage?.total_tokens,
+            fileSizeBytes: fs.statSync(outputPath).size
+          };
+
+          await saveVideoMetadataToSupabase(videoMetadata);
+          
+          // Start AI processing in background
+          setTimeout(async () => {
+            try {
+              const { data: transcriptionRecord } = await getTranscriptionByJobId(jobId);
+              if (transcriptionRecord?.id) {
+                await processVideoThroughAIFunctions(transcriptionRecord.id, jobId);
+              }
+            } catch (aiError) {
+              console.error(`❌ AI processing failed for ${jobId}:`, aiError);
+            }
+          }, 1000);
         }
+        
+        // Cleanup MP3
+        setTimeout(() => {
+          try {
+            if (fs.existsSync(outputPath)) {
+              fs.unlinkSync(outputPath);
+            }
+          } catch (err) {
+            console.error(`❌ Failed to cleanup ${outputPath}:`, err);
+          }
+        }, 60 * 60 * 1000);
+        
+        jobIds.push(jobId);
+        processedCount++;
+        console.log(`✅ [${i + 1}/${preparedVideos.length}] Completed: ${metadata.title}`);
         
       } catch (error) {
         failedCount++;
-        console.error(`❌ Video ${i + 1}/${videoUrls.length} failed with exception:`, error);
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        console.error(`❌ [${i + 1}/${preparedVideos.length}] Failed:`, error);
+        await updateVideoStatus(jobId, 'Failed', errorMessage);
+        
+        // Cleanup on error
+        const outputPath = path.join(uploadsDir, `${jobId}.mp3`);
+        try {
+          if (fs.existsSync(outputPath)) {
+            fs.unlinkSync(outputPath);
+          }
+        } catch (cleanupError) {
+          console.error('Cleanup error:', cleanupError);
+        }
       }
     }
 
-    console.log(`\n🎉 Channel processing complete: ${processedCount}/${videoUrls.length} videos processed successfully`);
+    console.log(`\n🎉 PHASE 2 Complete: ${processedCount}/${preparedVideos.length} videos processed successfully`);
 
     return {
       success: true,
