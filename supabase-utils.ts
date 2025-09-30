@@ -400,6 +400,46 @@ async function downloadThumbnail(url: string): Promise<Buffer | null> {
 }
 
 /**
+ * Update status of old video records to "Upload" before retry
+ * This prevents users from clicking retry multiple times
+ */
+export async function updateOldVideoStatusToUpload(youtubeUrl: string, userId: string): Promise<boolean> {
+  if (!supabase) {
+    console.warn('⚠️ Supabase not configured, skipping status update');
+    return false;
+  }
+
+  try {
+    console.log(`🔄 Updating old records to Upload status for ${youtubeUrl}`);
+    
+    const { data, error } = await supabase
+      .from('video_transcriptions')
+      .update({ 
+        status: 'Upload',
+        updated_at: new Date().toISOString()
+      })
+      .eq('youtube_url', youtubeUrl)
+      .eq('user_id', userId)
+      .select();
+
+    if (error) {
+      console.error('❌ Failed to update old video status:', error);
+      return false;
+    }
+
+    const updatedCount = data?.length || 0;
+    if (updatedCount > 0) {
+      console.log(`✅ Updated ${updatedCount} record(s) to Upload status`);
+    }
+    return true;
+    
+  } catch (error) {
+    console.error('❌ Update old video status failed:', error);
+    return false;
+  }
+}
+
+/**
  * Delete old video records for retry (especially failed ones)
  */
 export async function deleteOldVideoRecords(youtubeUrl: string, userId: string): Promise<number> {

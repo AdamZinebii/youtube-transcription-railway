@@ -268,10 +268,19 @@ async function processSingleVideo(
   const jobId = uuidv4();
   console.log(`🎵 Starting job ${jobId} for URL: ${youtubeUrl}${isRetry ? ' (RETRY)' : ''}`);
 
-  // 🗑️ If this is a retry, delete any existing failed records for this URL and user
+  // 🔄 If this is a retry, first update status to "Upload" to prevent double-retry
+  // Then delete old records and create new one
   if (isRetry) {
-    console.log(`🗑️ Retry detected - deleting old failed records for ${youtubeUrl}`);
-    const { deleteOldVideoRecords } = await import('./supabase-utils');
+    console.log(`🔄 Retry detected - updating status and cleaning old records for ${youtubeUrl}`);
+    const { updateOldVideoStatusToUpload, deleteOldVideoRecords } = await import('./supabase-utils');
+    
+    // Step 1: Update status to "Upload" immediately (prevents double-click retry)
+    const statusUpdated = await updateOldVideoStatusToUpload(youtubeUrl, userId);
+    if (statusUpdated) {
+      console.log(`✅ Status updated to Upload - retry button will disappear`);
+    }
+    
+    // Step 2: Delete old records
     const deleted = await deleteOldVideoRecords(youtubeUrl, userId);
     if (deleted) {
       console.log(`✅ Deleted ${deleted} old record(s) for retry`);
