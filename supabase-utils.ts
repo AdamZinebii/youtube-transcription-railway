@@ -400,6 +400,40 @@ async function downloadThumbnail(url: string): Promise<Buffer | null> {
 }
 
 /**
+ * Delete old video records for retry (especially failed ones)
+ */
+export async function deleteOldVideoRecords(youtubeUrl: string, userId: string): Promise<number> {
+  if (!supabase) {
+    console.warn('⚠️ Supabase not configured, skipping delete');
+    return 0;
+  }
+
+  try {
+    console.log(`🗑️ Deleting old records for ${youtubeUrl} and user ${userId}`);
+    
+    const { data, error } = await supabase
+      .from('video_transcriptions')
+      .delete()
+      .eq('youtube_url', youtubeUrl)
+      .eq('user_id', userId)
+      .select();
+
+    if (error) {
+      console.error('❌ Failed to delete old video records:', error);
+      return 0;
+    }
+
+    const deletedCount = data?.length || 0;
+    console.log(`✅ Deleted ${deletedCount} old record(s) for ${youtubeUrl}`);
+    return deletedCount;
+    
+  } catch (error) {
+    console.error('❌ Delete old video records failed:', error);
+    return 0;
+  }
+}
+
+/**
  * Créer l'enregistrement initial avec statut "Upload"
  */
 export async function createInitialVideoRecord(jobId: string, youtubeUrl: string, userId: string): Promise<string | null> {

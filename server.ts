@@ -54,6 +54,7 @@ interface TranscriptionRequest {
   transcriptionModel?: 'gpt-4o-transcribe' | 'gpt-4o-mini-transcribe' | 'whisper-1';
   language?: string;
   temperature?: number;
+  isRetry?: boolean; // Flag indicating this is a retry - delete old failed record first
 }
 
 interface TranscriptionResponse {
@@ -261,10 +262,21 @@ async function processSingleVideo(
   userId: string,
   transcriptionModel: string = 'whisper-1',
   language?: string,
-  temperature?: number
+  temperature?: number,
+  isRetry: boolean = false
 ): Promise<TranscriptionResponse> {
   const jobId = uuidv4();
-  console.log(`🎵 Starting job ${jobId} for URL: ${youtubeUrl}`);
+  console.log(`🎵 Starting job ${jobId} for URL: ${youtubeUrl}${isRetry ? ' (RETRY)' : ''}`);
+
+  // 🗑️ If this is a retry, delete any existing failed records for this URL and user
+  if (isRetry) {
+    console.log(`🗑️ Retry detected - deleting old failed records for ${youtubeUrl}`);
+    const { deleteOldVideoRecords } = await import('./supabase-utils');
+    const deleted = await deleteOldVideoRecords(youtubeUrl, userId);
+    if (deleted) {
+      console.log(`✅ Deleted ${deleted} old record(s) for retry`);
+    }
+  }
 
   // 🔄 Créer l'enregistrement initial avec statut "Upload"
   const recordId = await createInitialVideoRecord(jobId, youtubeUrl, userId);
@@ -626,7 +638,7 @@ app.get('/health', (req, res) => {
  * Supports both single videos and channel URLs
  */
 app.post('/transcribe', async (req, res) => {
-  const { youtubeUrl, userId, transcriptionModel = 'whisper-1', language, temperature }: TranscriptionRequest = req.body;
+  const { youtubeUrl, userId, transcriptionModel = 'whisper-1', language, temperature, isRetry = false }: TranscriptionRequest = req.body;
   
   if (!youtubeUrl) {
     return res.status(400).json({
@@ -674,7 +686,8 @@ app.post('/transcribe', async (req, res) => {
         userId,
         transcriptionModel,
         language,
-        temperature
+        temperature,
+        isRetry
       );
       
       return res.json(result);
